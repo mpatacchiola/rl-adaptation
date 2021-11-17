@@ -5,6 +5,7 @@ import math
 import time
 from typing import Any, Callable, Dict, Optional, Sequence
 import os
+import random
 
 try:
   import brax
@@ -26,12 +27,37 @@ import torch
 from torch import nn
 from torch import optim
 import torch.nn.functional as F
+from utils import Logger
+
+import argparse
+parser = argparse.ArgumentParser(description="Training script for the unsupervised phase via self-supervision")
+parser.add_argument("--seed", default=-1, type=int, help="Seed for Numpy and PyTorch. Default: -1 (None)")
+parser.add_argument("--episodes_counter", default=0, type=int, help="Starts the episode counter from this value.")
+parser.add_argument("--method", default="ppo", help="The name of the method")
+parser.add_argument("--id", default="", help="An additional string that is attached to each saved file")
+parser.add_argument("--checkpoint_path", default="", help="Path for the checkpoint file")
+parser.add_argument("--env", default="HalfCheetah", help="Name of the mujoco env to use: HalfCheetah-v2, Ant-v2")
+parser.add_argument("--device", default="cuda", type=str, help="The device to use (e.g. cpu, cuda, etc)")
+args = parser.parse_args()
 
 # have torch allocate on device first, to prevent JAX from swallowing up all the
 # GPU memory. By default JAX will pre-allocate 90% of the available GPU memory:
 # https://jax.readthedocs.io/en/latest/gpu_memory_allocation.html
 #v = torch.ones(1, device='cuda')
 os.environ['XLA_PYTHON_CLIENT_ALLOCATOR'] = 'platform'
+
+if(args.seed>=0):
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print("[INFO] Setting SEED: " + str(args.seed))   
+else:
+    print("[INFO] Setting SEED: random seed")
+    
 
 class Agent(nn.Module):
   """Standard PPO Agent with GAE and observation normalization."""
@@ -42,6 +68,7 @@ class Agent(nn.Module):
                entropy_cost: float,
                discounting: float,
                reward_scaling: float,
+               clip_ration: float,
                device: str):
     super(Agent, self).__init__()
 
@@ -67,7 +94,7 @@ class Agent(nn.Module):
     self.discounting = discounting
     self.reward_scaling = reward_scaling
     self.lambda_ = 0.95
-    self.epsilon = 0.3
+    self.clip_ration = clip_ration
     self.device = device
 
   @torch.jit.export
@@ -184,8 +211,8 @@ class Agent(nn.Module):
 
     rho_s = torch.exp(target_action_log_probs - behaviour_action_log_probs)
     surrogate_loss1 = rho_s * advantages
-    surrogate_loss2 = rho_s.clip(1 - self.epsilon,
-                                 1 + self.epsilon) * advantages
+    surrogate_loss2 = rho_s.clip(1 - self.clip_ration,
+                                 1 + self.clip_ration) * advantages
     policy_loss = -torch.mean(torch.minimum(surrogate_loss1, surrogate_loss2))
 
     # Value function loss
@@ -247,7 +274,7 @@ def train_unroll(agent, env, observation, num_unrolls, unroll_length):
 
 
 def train(
-    env_name: str = 'ant',
+    env_name,
     num_envs: int = 2048,
     episode_length: int = 1000,
     device: str = 'cuda',
@@ -261,6 +288,8 @@ def train(
     entropy_cost: float = 1e-2,
     discounting: float = .97,
     learning_rate: float = 3e-4,
+    clip_ration: float = .3,
+    seed: int = -1,
     progress_fn: Optional[Callable[[int, Dict[str, Any]], None]] = None,
 ):
   """Trains a policy via PPO."""
@@ -273,17 +302,23 @@ def train(
   env = to_torch.JaxToTorchWrapper(env, device=device)
 
   # env warmup
+  if(seed!=-1): env.seed(seed)
   env.reset()
   action = torch.zeros(env.action_space.shape).to(device)
   env.step(action)
-
+  
   # create the agent
   policy_layers = [
       env.observation_space.shape[-1], 64, 64, env.action_space.shape[-1] * 2
   ]
   value_layers = [env.observation_space.shape[-1], 64, 64, 1]
-  agent = Agent(policy_layers, value_layers, entropy_cost, discounting,
-                reward_scaling, device)
+  agent = Agent(policy_layers=policy_layers,
+                value_layers=value_layers,
+                entropy_cost=entropy_cost,
+                discounting=discounting,
+                reward_scaling=reward_scaling,
+                clip_ration=clip_ration,
+                device=device)            
   agent = torch.jit.script(agent.to(device))
   optimizer = optim.Adam(agent.parameters(), lr=learning_rate)
 
@@ -300,6 +335,7 @@ def train(
       episode_avg_length = env.num_envs * episode_length / episode_count
       eval_sps = env.num_envs * episode_length / duration
       progress = {
+          'train/num_timesteps': num_timesteps,
           'eval/episode_reward': episode_reward,
           'eval/completed_episodes': episode_count,
           'eval/avg_episode_length': episode_avg_length,
@@ -360,7 +396,8 @@ ydata = []
 eval_sps = []
 train_sps = []
 times = [datetime.now()]
-
+my_logger = Logger(header="step,reward", file_path="./logs/"+args.method.lower()+"/"+args.env.lower(), id="seed_"+str(args.seed))
+    
 def progress(num_steps, metrics):
   times.append(datetime.now())
   xdata.append(num_steps)
@@ -368,19 +405,71 @@ def progress(num_steps, metrics):
   eval_sps.append(metrics['speed/eval_sps'])
   train_sps.append(metrics['speed/sps'])
   #clear_output(wait=True)
-  plt.xlim([0, 30_000_000])
-  plt.ylim([0, 6000])
+  plt.xlim([0, metrics['train/num_timesteps']])
+  #plt.ylim([0, 6000])
   plt.xlabel('# environment steps')
   plt.ylabel('reward per episode')
   plt.plot(xdata, ydata)
-  #plt.show()
-  plt.savefig('./result.png', dpi=200)
-  print("[INFO]", "Step:", num_steps, "Reward:", metrics['eval/episode_reward'].item())
+  # Save the figure using same Logger name
+  fig_name = my_logger.id
+  plt.savefig("./logs/"+args.method.lower()+"/"+args.env.lower()+"/"+fig_name+".png", dpi=200)
+  # Printing and logging
+  my_logger.append(str(num_steps), str(metrics['eval/episode_reward'].item()))
+  my_logger.write()
+  print("[INFO]", "Step:", num_steps,
+        #"Loss:", metrics['losses/total_loss'],
+        "Reward:", metrics['eval/episode_reward'].item())
 
-train(progress_fn=progress)
+# Training
+def main():
+    print("[INFO] Environment:", args.env.lower())
+    #print("[INFO] Seed:", str(SEED))
 
-print(f'time to jit: {times[1] - times[0]}')
-print(f'time to train: {times[-1] - times[1]}')
-print(f'eval steps/sec: {np.mean(eval_sps[1:])}')
-print(f'train steps/sec: {np.mean(train_sps[1:])}')
-#!nvidia-smi -L
+    if(args.env.lower() == 'halfcheetah'):
+        train(env_name='halfcheetah',
+              num_envs=2048,
+              episode_length=1000,
+              device=args.device,
+              num_timesteps=100_000_000,
+              eval_frequency=100,
+              unroll_length=20,
+              batch_size=512,
+              num_minibatches=32,
+              num_update_epochs=8,
+              reward_scaling=1,
+              entropy_cost=1e-2,
+              discounting=.95,
+              learning_rate=3e-4,
+              clip_ration=.3,
+              seed=args.seed,
+              progress_fn=progress)
+    elif(args.env.lower() == 'ant'):
+        train(env_name='ant',
+              num_envs=2048,
+              episode_length=1000,
+              device=args.device,
+              num_timesteps=100_000_000,
+              eval_frequency=100,
+              unroll_length=5,
+              batch_size=1024,
+              num_minibatches=32,
+              num_update_epochs=4,
+              reward_scaling=10,
+              entropy_cost=1e-2,
+              discounting=.97,
+              learning_rate=3e-4,
+              clip_ration=.3,
+              seed=args.seed,
+              progress_fn=progress)
+    else:
+        print("[ERROR] The env", args.env, "is not supported")
+        quit()
+
+    print(f'time to jit: {times[1] - times[0]}')
+    print(f'time to train: {times[-1] - times[1]}')
+    print(f'eval steps/sec: {np.mean(eval_sps[1:])}')
+    print(f'train steps/sec: {np.mean(train_sps[1:])}')
+
+
+if __name__ == "__main__":
+    main()  

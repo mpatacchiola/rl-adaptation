@@ -38,11 +38,11 @@ Note that the version of Brax et al. that works with the above libraries is this
 
 7. **Not used** In alternative pytorch can be installed directly in Conda, but it is necessary to check the version: `conda install -n myenv pytorch torchvision torchaudio cudatoolkit=11.3 -c pytorch`
 
-8. **Note** this is very important for *ant* and *halfcheetah* envs in Brax. It is necessary to add this line or there is an OOM break: `os.environ['XLA_PYTHON_CLIENT_ALLOCATOR'] = 'platform'`. This seems to be due to the pre-allocation of memory of JAX, see [this])https://jax.readthedocs.io/en/latest/gpu_memory_allocation.html)
+8. **Note** this is very important for *ant* and *halfcheetah* envs in Brax. It is necessary to add this line or there is an OOM break: `os.environ['XLA_PYTHON_CLIENT_ALLOCATOR'] = 'platform'`. This seems to be due to the pre-allocation of memory of JAX, see [this](https://jax.readthedocs.io/en/latest/gpu_memory_allocation.html). In some other code that I found online they create a dummy vector at the beginning of the code, this solution did not work for me.
 
 From the [salina code](https://github.com/facebookresearch/salina/tree/main/salina_examples/rl/ppo_brax), it seems they use other strings:  `os.environ['OMP_NUM_THREADS']=1` and `os.environ['XLA_PYTHON_CLIENT_PREALLOCATE']=false`
 
-9. To create a new SSH key for a new Github repository:
+9. To create a new **SSH key** for a new **Github** repository:
 
 - Type `ssh-keygen` and decide the name and password (can be empty) of your key.
 - Copy the content of the file that has been created in `/homes/mp2008/.ssh/id_rsa.pub` (name and path can change based on you choice).

@@ -39,20 +39,16 @@ class AverageMeter(object):
         
         
 class Logger():
-    def __init__(self, header, file_path, file_name=None, id="", verbose=True):
+    def __init__(self, header, file_path, id="", verbose=True):
         if not os.path.exists(file_path): 
             os.makedirs(file_path)
-            
-        if(file_name is not None):
-            self.file_name=file_name
-        else:
-            now = datetime.now()
-            self.file_name = file_path + "/" + now.strftime("%H%M%S_%d%m%Y")
-            
-        if(id!=""): self.file_name += "_" + str(id) # Adding the ID string
-        self.file_name +=  ".csv" # Adding the extension
         
         self.buffer = list()
+                    
+        now = datetime.now()
+        if(id!=""): self.id = now.strftime("%H%M%S_%d%m%Y") + "_" + str(id)
+        else: self.id = now.strftime("%H%M%S_%d%m%Y")
+        self.file_name = file_path + "/" + self.id + ".csv"
         
         f = open(self.file_name, "a")
         f.write(header + "\n")
